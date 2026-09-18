@@ -33,6 +33,19 @@ def find_cloudflared():
     return "cloudflared"
 
 def start_cloudflare_tunnel():
+    tunnel_domain = os.getenv("TUNNEL_DOMAIN", "").strip()
+    if tunnel_domain:
+        logger.info(f"Starting Permanent Tunnel for domain: {tunnel_domain}...")
+        cmd = ["ngrok", "http", f"--domain={tunnel_domain}", "8000"]
+        subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        print("\n" + "=" * 70)
+        print("🌐 PERMANENT TUNNEL READY!")
+        print(f"📌 Webhook Callback URL: https://{tunnel_domain}/webhook/whatsapp")
+        print("📌 Verify Token:        mail_automation_secret_verify_token")
+        print("=" * 70 + "\n")
+        sys.stdout.flush()
+        return
+
     exe = find_cloudflared()
     logger.info("Starting Cloudflare HTTPS Tunnel...")
     proc = subprocess.Popen(
