@@ -1,0 +1,23 @@
+# Core Web Framework & Async
+fastapi>=0.100.0
+uvicorn[standard]>=0.22.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# Database & ORM
+sqlalchemy>=2.0.0
+
+# Local AI Models & RAG
+ollama>=0.3.0
+chromadb>=0.4.0
+sentence-transformers>=2.2.0
+faster-whisper>=0.10.0
+
+# External Integrations
+google-api-python-client>=2.90.0
+google-auth-httplib2>=0.1.0
+google-auth-oauthlib>=1.0.0
+requests>=2.31.0
+
+# Utilities
+python-multipart>=0.0.6
