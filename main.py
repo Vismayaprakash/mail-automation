@@ -157,6 +157,14 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
                     if msg_id:
                         PROCESSED_MSG_IDS.add(msg_id)
 
+                    # Ignore stale messages queued by Meta while server was offline (> 2 minutes old)
+                    import time
+                    msg_ts = int(msg.get("timestamp", 0))
+                    current_ts = int(time.time())
+                    if msg_ts > 0 and (current_ts - msg_ts > 120):
+                        logger.info(f"Stale WhatsApp message ID '{msg_id}' from Meta backlog queue (Age: {current_ts - msg_ts}s). Ignoring.")
+                        continue
+
                     msg_type = msg.get("type")
                     
                     # Fetch active or oldest pending approval thread (FIFO lock)
