@@ -39,15 +39,18 @@ class WhatsAppClient:
     def twilio_whatsapp_number(self) -> str:
         return os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886").strip()
 
-    def send_approval_request(self, thread_id: str, sender_name: str, sender_email: str, subject: str, summary: str, draft_reply: str) -> str:
+    def send_approval_request(self, thread_id: str, sender_name: str, sender_email: str, subject: str, summary: str, draft_reply: str, past_context: str = None) -> str:
         """Send formatted WhatsApp approval request message."""
         summary_clean = summary[:1000] if len(summary) > 1000 else summary
         draft_clean = draft_reply[:2000] if len(draft_reply) > 2000 else draft_reply
+
+        context_section = f"📜 *Previous Context:* {past_context.strip()}\n\n" if past_context and past_context.strip() else ""
 
         message_body = (
             f"📧 *New Email Notification*\n\n"
             f"👤 *From:* {sender_name} ({sender_email})\n"
             f"📌 *Subject:* {subject}\n\n"
+            f"{context_section}"
             f"📝 *Summary:*\n{summary_clean}\n\n"
             f"💬 *Proposed Reply Draft:*\n\"{draft_clean}\"\n\n"
             f"----------------------------------------\n"

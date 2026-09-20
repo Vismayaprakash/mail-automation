@@ -60,15 +60,18 @@ class WorkflowOrchestrator:
         db.commit()
         db.refresh(email_thread)
 
-        # Step 4: Dispatch WhatsApp Approval Request
+        # Step 4: Dispatch WhatsApp Approval Request with Previous Context
         self.active_thread_id = thread_id
+        past_context = self._get_past_context(db=db, sender=sender, current_message_id=message_id)
+
         wa_msg_id = whatsapp_client.send_approval_request(
             thread_id=thread_id,
             sender_name=email_thread.sender_name,
             sender_email=sender,
             subject=subject,
             summary=summary,
-            draft_reply=proposed_reply
+            draft_reply=proposed_reply,
+            past_context=past_context
         )
         
         email_thread.whatsapp_message_id = wa_msg_id
@@ -76,6 +79,29 @@ class WorkflowOrchestrator:
         db.commit()
 
         return email_thread
+
+    def _get_past_context(self, db: Session, sender: str, current_message_id: str) -> str:
+        """Fetch summary of previous interactions with this contact for WhatsApp notification."""
+        try:
+            past_threads = db.query(EmailThread).filter(
+                (EmailThread.sender == sender) | (EmailThread.recipient == sender),
+                EmailThread.message_id != current_message_id
+            ).order_by(EmailThread.created_at.desc()).limit(3).all()
+
+            if not past_threads:
+                return "No previous interaction history found with this contact."
+
+            lines = []
+            for t in reversed(past_threads):
+                t_summary = (t.summary or t.body or "").strip().replace("\n", " ")
+                if len(t_summary) > 120:
+                    t_summary = t_summary[:117] + "..."
+                lines.append(f"* *{t.subject}* [{t.status}]: {t_summary}")
+
+            return "\n".join(lines)
+        except Exception as e:
+            logger.error(f"Error fetching past context for {sender}: {e}")
+            return ""
 
     def approve_and_send(self, db: Session, thread_id: str) -> bool:
         """Approve and dispatch the current email draft via Gmail API."""
