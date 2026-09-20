@@ -96,6 +96,7 @@ class WorkflowOrchestrator:
 
         if success:
             thread.status = ThreadStatus.SENT.value
+            self.active_thread_id = None
             db.commit()
 
             # Step 2: Index sent email in RAG for learning tone
@@ -117,6 +118,25 @@ class WorkflowOrchestrator:
             return True
 
         return False
+
+    def reject_thread(self, db: Session, thread_id: str) -> bool:
+        """Reject/skip the current email thread without sending any reply."""
+        thread = db.query(EmailThread).filter(EmailThread.thread_id == thread_id).first()
+        if not thread:
+            logger.error(f"Thread {thread_id} not found in database.")
+            return False
+
+        logger.info(f"Rejected thread {thread_id}. Marking status as REJECTED and skipping email reply.")
+        thread.status = ThreadStatus.REJECTED.value
+        self.active_thread_id = None
+        db.commit()
+
+        whatsapp_client.send_text_message(
+            f"⏭️ *Email Skipped*\n\nSkipped reply for: {thread.sender_name}\nSubject: {thread.subject}\nProceeding to next email."
+        )
+        db.add(AuditLog(thread_id=thread_id, action="EMAIL_REJECTED_SKIPPED", details=f"Thread {thread_id} skipped by user."))
+        db.commit()
+        return True
 
     def revise_via_voice(self, db: Session, thread_id: str, audio_file_path: str) -> bool:
         """Transcribe voice note, revise draft with Ollama, update DB, and send NEW WhatsApp approval request (DO NOT AUTO-SEND)."""

@@ -207,11 +207,10 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
                             logger.info(f"User explicitly approved thread '{pending_thread.subject}'. Sending email via Gmail API.")
                             orchestrator.approve_and_send(db, pending_thread.thread_id)
                         
-                        # 3. Explicit Rejection -> "NO" or "REJECT"
-                        elif upper_text in ["NO", "REJECT"]:
-                            whatsapp_client.send_text_message(
-                                f"⏸️ Reply rejected for thread '{pending_thread.subject}'. Send a voice note or text with instructions to revise."
-                            )
+                        # 3. Explicit Rejection / Skip -> "NO", "REJECT", "SKIP"
+                        elif upper_text in ["NO", "REJECT", "SKIP"]:
+                            logger.info(f"User rejected/skipped thread '{pending_thread.subject}'. Skipping email reply.")
+                            orchestrator.reject_thread(db, pending_thread.thread_id)
                         
                         # 4. Text Revision Instructions -> Revise draft asynchronously
                         else:
