@@ -103,14 +103,28 @@ class WorkflowOrchestrator:
             logger.error(f"Error fetching past context for {sender}: {e}")
             return ""
 
+    def _get_pending_or_latest_thread(self, db: Session, thread_id: str) -> EmailThread:
+        """Fetch the active pending approval thread record, or the latest record for thread_id."""
+        thread = db.query(EmailThread).filter(
+            EmailThread.thread_id == thread_id,
+            EmailThread.status == ThreadStatus.PENDING_APPROVAL.value
+        ).order_by(EmailThread.id.desc()).first()
+
+        if not thread:
+            thread = db.query(EmailThread).filter(
+                EmailThread.thread_id == thread_id
+            ).order_by(EmailThread.id.desc()).first()
+
+        return thread
+
     def approve_and_send(self, db: Session, thread_id: str) -> bool:
         """Approve and dispatch the current email draft via Gmail API."""
-        thread = db.query(EmailThread).filter(EmailThread.thread_id == thread_id).first()
+        thread = self._get_pending_or_latest_thread(db, thread_id)
         if not thread:
             logger.error(f"Thread {thread_id} not found in database.")
             return False
 
-        logger.info(f"Approved thread {thread_id}. Sending email via Gmail API...")
+        logger.info(f"Approved thread {thread_id} (ID: {thread.id}). Sending email via Gmail API...")
 
         # Step 1: Send via Gmail API
         success = gmail_client.send_email(
@@ -147,12 +161,12 @@ class WorkflowOrchestrator:
 
     def reject_thread(self, db: Session, thread_id: str) -> bool:
         """Reject/skip the current email thread without sending any reply."""
-        thread = db.query(EmailThread).filter(EmailThread.thread_id == thread_id).first()
+        thread = self._get_pending_or_latest_thread(db, thread_id)
         if not thread:
             logger.error(f"Thread {thread_id} not found in database.")
             return False
 
-        logger.info(f"Rejected thread {thread_id}. Marking status as REJECTED and skipping email reply.")
+        logger.info(f"Rejected thread {thread_id} (ID: {thread.id}). Marking status as REJECTED and skipping email reply.")
         thread.status = ThreadStatus.REJECTED.value
         self.active_thread_id = None
         db.commit()
@@ -166,7 +180,7 @@ class WorkflowOrchestrator:
 
     def revise_via_voice(self, db: Session, thread_id: str, audio_file_path: str) -> bool:
         """Transcribe voice note, revise draft with Ollama, update DB, and send NEW WhatsApp approval request (DO NOT AUTO-SEND)."""
-        thread = db.query(EmailThread).filter(EmailThread.thread_id == thread_id).first()
+        thread = self._get_pending_or_latest_thread(db, thread_id)
         if not thread:
             logger.error(f"Thread {thread_id} not found.")
             return False

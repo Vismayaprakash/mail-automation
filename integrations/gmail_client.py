@@ -108,8 +108,15 @@ class GmailClient:
                             sender = from_val
                             sender_name = from_val
 
-                # Skip automated system & job alert emails
+                # Skip self-sent emails (from user's own email account)
                 sender_lower = sender.lower()
+                user_email_lower = (settings.GMAIL_USER_EMAIL or "").lower().strip()
+                if user_email_lower and (sender_lower == user_email_lower or user_email_lower in sender_lower):
+                    logger.info(f"Skipping self-sent email: From '{sender}' | Subject '{subject}'")
+                    self.mark_as_read(msg_id)
+                    continue
+
+                # Skip automated system & job alert emails
                 subject_lower = subject.lower()
                 if any(keyword in sender_lower or keyword in subject_lower for keyword in SYSTEM_IGNORE_KEYWORDS):
                     logger.info(f"Skipping automated email: From '{sender}' | Subject '{subject}'")
