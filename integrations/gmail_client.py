@@ -62,11 +62,20 @@ class GmailClient:
             return []
 
         try:
-            results = self.service.users().messages().list(
-                userId=settings.GMAIL_USER_EMAIL,
-                q="is:unread label:INBOX",
-                maxResults=10  # Check 10 most recent unread emails
-            ).execute()
+            try:
+                results = self.service.users().messages().list(
+                    userId=settings.GMAIL_USER_EMAIL,
+                    q="is:unread label:INBOX",
+                    maxResults=10
+                ).execute()
+            except Exception as conn_err:
+                logger.warning(f"Gmail fetch connection warning ({conn_err}). Re-authenticating...")
+                self.authenticate()
+                results = self.service.users().messages().list(
+                    userId=settings.GMAIL_USER_EMAIL,
+                    q="is:unread label:INBOX",
+                    maxResults=10
+                ).execute()
 
             messages = results.get('messages', [])
             email_list = []
@@ -171,11 +180,21 @@ class GmailClient:
             if thread_id:
                 body['threadId'] = thread_id
 
-            self.service.users().messages().send(
-                userId=settings.GMAIL_USER_EMAIL,
-                body=body
-            ).execute()
-            
+            try:
+                self.service.users().messages().send(
+                    userId=settings.GMAIL_USER_EMAIL,
+                    body=body
+                ).execute()
+            except Exception as ssl_err:
+                logger.warning(f"Gmail connection error ({ssl_err}). Re-authenticating and retrying send...")
+                if self.authenticate():
+                    self.service.users().messages().send(
+                        userId=settings.GMAIL_USER_EMAIL,
+                        body=body
+                    ).execute()
+                else:
+                    raise ssl_err
+
             logger.info(f"Successfully sent email to {to_email}")
             return True
         except Exception as e:
