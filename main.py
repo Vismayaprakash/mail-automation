@@ -139,9 +139,57 @@ def process_text_revision_async(record_id: int, user_text: str):
     finally:
         db.close()
 
+def process_document_attachment_async(record_id: int, media_id: str, filename: str = None):
+    """Background task to download WhatsApp document/image attachment and register it in EmailThread DB record."""
+    import json
+    from database.session import SessionLocal
+    db = SessionLocal()
+    try:
+        pending_thread = db.query(EmailThread).filter(EmailThread.id == record_id).first()
+        if not pending_thread:
+            logger.error(f"Thread record ID #{record_id} not found for attachment processing.")
+            return
+
+        filename = filename or f"attachment_{media_id}.bin"
+        attachment_dir = os.path.join("data", "attachments", str(pending_thread.id))
+        os.makedirs(attachment_dir, exist_ok=True)
+        file_path = os.path.join(attachment_dir, filename)
+
+        downloaded = whatsapp_client.download_media(media_id, file_path)
+        if downloaded and os.path.exists(file_path):
+            existing_att = getattr(pending_thread, "attachments", None)
+            att_list = []
+            if existing_att:
+                try:
+                    parsed = json.loads(existing_att)
+                    if isinstance(parsed, list):
+                        att_list = parsed
+                    elif isinstance(parsed, str):
+                        att_list = [parsed]
+                except Exception:
+                    att_list = [existing_att]
+            
+            if file_path not in att_list:
+                att_list.append(file_path)
+
+            pending_thread.attachments = json.dumps(att_list)
+            db.commit()
+            logger.info(f"📎 Registered attachment '{filename}' for thread ID #{pending_thread.id} (Total attachments: {len(att_list)})")
+
+            whatsapp_client.send_text_message(
+                f"📎 *Attachment Received!*\n\n"
+                f"File: *{filename}*\n"
+                f"Linked to email thread: *{pending_thread.subject}*\n\n"
+                f"It will be attached when you reply *YES* to send this email."
+            )
+    except Exception as e:
+        logger.error(f"Error processing WhatsApp attachment in background: {e}")
+    finally:
+        db.close()
+
 @app.post("/webhook/whatsapp")
 async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
-    """Webhook endpoint receiving user WhatsApp messages (text approvals or audio voice notes)."""
+    """Webhook endpoint receiving user WhatsApp messages (text approvals, voice notes, or documents/images)."""
     try:
         body = await request.json()
         logger.info(f"Received WhatsApp Payload: {body}")
@@ -243,6 +291,23 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
                             threading.Thread(
                                 target=process_voice_note_async,
                                 args=(pending_thread.id, media_id),
+                                daemon=True
+                            ).start()
+
+                    # Case 3: User sent Document / Image / File Attachment
+                    elif msg_type in ["document", "image", "file", "sticker"]:
+                        media_info = msg.get(msg_type, {})
+                        media_id = media_info.get("id")
+                        filename = media_info.get("filename")
+                        if not filename:
+                            ext = "pdf" if msg_type == "document" else ("jpg" if msg_type == "image" else "bin")
+                            filename = f"{msg_type}_{media_id[:8] if media_id else 'file'}.{ext}"
+
+                        if media_id:
+                            import threading
+                            threading.Thread(
+                                target=process_document_attachment_async,
+                                args=(pending_thread.id, media_id, filename),
                                 daemon=True
                             ).start()
 

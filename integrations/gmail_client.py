@@ -1,7 +1,13 @@
 import base64
 import logging
 import os
+import socket
+import mimetypes
+socket.setdefaulttimeout(15)
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -39,6 +45,9 @@ class GmailClient:
             if creds and creds.expired and creds.refresh_token:
                 try:
                     creds.refresh(Request())
+                    with open(self.token_file, 'w') as token:
+                        token.write(creds.to_json())
+                    logger.info("Refreshed Gmail OAuth access token and saved to token.json.")
                 except Exception as e:
                     logger.error(f"Error refreshing Gmail token: {e}")
                     creds = None
@@ -171,16 +180,44 @@ class GmailClient:
         except Exception as e:
             logger.error(f"Failed to mark message {message_id} as read: {e}")
 
-    def send_email(self, to_email: str, subject: str, body_text: str, thread_id: str = None) -> bool:
-        """Send an email or thread reply using Gmail API."""
+    def send_email(self, to_email: str, subject: str, body_text: str, thread_id: str = None, attachments: list = None) -> bool:
+        """Send an email or thread reply using Gmail API with optional file attachments."""
         if not self.service and not self.authenticate():
-            logger.info(f"[MOCK GMAIL SEND] To: {to_email} | Subject: {subject} | Body: {body_text[:50]}...")
+            att_info = f" with {len(attachments)} attachment(s)" if attachments else ""
+            logger.info(f"[MOCK GMAIL SEND] To: {to_email} | Subject: {subject}{att_info} | Body: {body_text[:50]}...")
             return True
 
         try:
-            message = MIMEText(body_text)
-            message['to'] = to_email
-            message['subject'] = subject
+            if attachments:
+                message = MIMEMultipart("mixed")
+                message['to'] = to_email
+                message['subject'] = subject
+                message.attach(MIMEText(body_text, 'plain'))
+
+                for file_path in attachments:
+                    if not file_path or not os.path.exists(file_path):
+                        logger.warning(f"Attachment file not found: {file_path}")
+                        continue
+
+                    filename = os.path.basename(file_path)
+                    content_type, encoding = mimetypes.guess_type(file_path)
+                    if content_type is None or encoding is not None:
+                        content_type = 'application/octet-stream'
+                    
+                    main_type, sub_type = content_type.split('/', 1)
+
+                    with open(file_path, 'rb') as f:
+                        part = MIMEBase(main_type, sub_type)
+                        part.set_payload(f.read())
+
+                    encoders.encode_base64(part)
+                    part.add_header('Content-Disposition', 'attachment', filename=filename)
+                    message.attach(part)
+                    logger.info(f"Attached file '{filename}' to email payload.")
+            else:
+                message = MIMEText(body_text)
+                message['to'] = to_email
+                message['subject'] = subject
 
             raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
             body = {'raw': raw_message}
@@ -192,17 +229,27 @@ class GmailClient:
                     userId=settings.GMAIL_USER_EMAIL,
                     body=body
                 ).execute()
-            except Exception as ssl_err:
-                logger.warning(f"Gmail connection error ({ssl_err}). Re-authenticating and retrying send...")
-                if self.authenticate():
+            except Exception as send_err:
+                err_str = str(send_err)
+                if "thread" in err_str.lower() and "threadId" in body:
+                    logger.warning(f"Gmail API error for threadId ({send_err}). Retrying send without threadId...")
+                    body.pop("threadId", None)
                     self.service.users().messages().send(
                         userId=settings.GMAIL_USER_EMAIL,
                         body=body
                     ).execute()
                 else:
-                    raise ssl_err
+                    logger.warning(f"Gmail connection error ({send_err}). Re-authenticating and retrying send...")
+                    if self.authenticate():
+                        self.service.users().messages().send(
+                            userId=settings.GMAIL_USER_EMAIL,
+                            body=body
+                        ).execute()
+                    else:
+                        raise send_err
 
-            logger.info(f"Successfully sent email to {to_email}")
+            att_log = f" (Attached {len(attachments)} file(s))" if attachments else ""
+            logger.info(f"Successfully sent email to {to_email}{att_log}")
             return True
         except Exception as e:
             logger.error(f"Failed to send email via Gmail API: {e}")

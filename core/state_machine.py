@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from sqlalchemy.orm import Session
 from database.models import EmailThread, ThreadStatus, AuditLog
 from core.llm import llm_manager
@@ -135,12 +136,27 @@ class WorkflowOrchestrator:
 
         logger.info(f"Approved thread ID #{thread.id} (Sender: {thread.sender}, Subject: '{thread.subject}'). Sending email via Gmail API...")
 
-        # Step 1: Send via Gmail API
+        # Step 1: Check for attachments
+        attachment_paths = []
+        raw_att = getattr(thread, "attachments", None)
+        if raw_att:
+            try:
+                import json
+                parsed = json.loads(raw_att)
+                if isinstance(parsed, list):
+                    attachment_paths = parsed
+                elif isinstance(parsed, str):
+                    attachment_paths = [parsed]
+            except Exception:
+                attachment_paths = [raw_att]
+
+        # Send via Gmail API
         success = gmail_client.send_email(
             to_email=thread.sender,
             subject=f"Re: {thread.subject}",
             body_text=thread.proposed_reply,
-            thread_id=thread.thread_id
+            thread_id=thread.thread_id,
+            attachments=attachment_paths if attachment_paths else None
         )
 
         if success:
@@ -159,8 +175,9 @@ class WorkflowOrchestrator:
             )
 
             # Step 3: Notify WhatsApp
+            att_notice = f"\n📎 *Attachments Sent:* {len(attachment_paths)} file(s)" if attachment_paths else ""
             whatsapp_client.send_text_message(
-                f"✅ *Email Sent Successfully!*\n\nReplied to: {thread.sender_name} ({thread.sender})\nSubject: Re: {thread.subject}"
+                f"✅ *Email Sent Successfully!*{att_notice}\n\nReplied to: {thread.sender_name} ({thread.sender})\nSubject: Re: {thread.subject}"
             )
             db.add(AuditLog(thread_id=thread.thread_id, action="EMAIL_APPROVED_AND_SENT", details=thread.proposed_reply[:100]))
             db.commit()
@@ -231,5 +248,60 @@ class WorkflowOrchestrator:
         db.add(AuditLog(thread_id=thread_id, action="VOICE_REVISION_DRAFT_UPDATED", details=transcript))
         db.commit()
         return True
+
+    def send_daily_pending_reminders(self, db: Session) -> int:
+        """Find pending approval emails from previous days and send a consolidated WhatsApp reminder."""
+        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        pending_threads = db.query(EmailThread).filter(
+            EmailThread.status == ThreadStatus.PENDING_APPROVAL.value,
+            EmailThread.created_at < today_start
+        ).order_by(EmailThread.created_at.asc()).all()
+
+        if not pending_threads:
+            logger.info("No pending emails from previous days found for daily reminder.")
+            return 0
+
+        count = len(pending_threads)
+        logger.info(f"Found {count} pending email(s) from previous days. Sending daily WhatsApp reminder...")
+
+        lines = [
+            f"🔔 *Daily Pending Email Reminder*",
+            f"You have *{count}* unreplied email(s) from previous days requiring your review:\n"
+        ]
+
+        for idx, thread in enumerate(pending_threads, 1):
+            recv_date = thread.created_at.strftime("%b %d, %Y") if thread.created_at else "Earlier"
+            summ = (thread.summary or thread.body or "").strip().replace("\n", " ")
+            if len(summ) > 100:
+                summ = summ[:97] + "..."
+
+            lines.append(
+                f"{idx}️⃣ *From:* {thread.sender_name} ({thread.sender})\n"
+                f"   📌 *Subject:* {thread.subject}\n"
+                f"   📅 *Received:* {recv_date}\n"
+                f"   📝 *Summary:* {summ}\n"
+                f"   🆔 *Thread ID:* #{thread.id}\n"
+            )
+
+        lines.append("----------------------------------------")
+        lines.append(
+            "💡 *How to respond:*\n"
+            "Swipe/Reply to the original message, or quote with ID:\n"
+            "• *YES* to approve and send\n"
+            "• *NO* to skip/reject\n"
+            "• *Voice Note* to revise draft"
+        )
+
+        message_text = "\n".join(lines)
+        whatsapp_client.send_text_message(message_text)
+
+        db.add(AuditLog(
+            action="DAILY_PENDING_REMINDER_SENT",
+            details=f"Sent daily reminder for {count} pending threads."
+        ))
+        db.commit()
+
+        return count
 
 orchestrator = WorkflowOrchestrator()

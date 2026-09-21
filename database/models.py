@@ -28,6 +28,7 @@ class EmailThread(Base):
     
     whatsapp_message_id = Column(String, nullable=True)
     voice_feedback_transcript = Column(Text, nullable=True)
+    attachments = Column(Text, nullable=True)
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

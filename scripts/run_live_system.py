@@ -107,6 +107,29 @@ def start_gmail_poller(interval_seconds: int = 15):
             logger.error(f"Error in Gmail poller thread: {e}")
         time.sleep(interval_seconds)
 
+def start_daily_reminder_scheduler(target_hour: int = 9, target_minute: int = 0):
+    """Background thread that triggers daily pending email reminder at 9:00 AM local time every day."""
+    from datetime import datetime
+    time.sleep(2)
+    logger.info(f"⏰ Daily Pending Email Reminder Scheduler started (Scheduled Daily for {target_hour:02d}:{target_minute:02d} AM local time)...")
+    last_reminder_date = None
+
+    while True:
+        try:
+            now = datetime.now()
+            today_date = now.date()
+            if last_reminder_date != today_date:
+                if now.hour > target_hour or (now.hour == target_hour and now.minute >= target_minute):
+                    from database.session import SessionLocal
+                    db = SessionLocal()
+                    count = orchestrator.send_daily_pending_reminders(db)
+                    db.close()
+                    last_reminder_date = today_date
+                    logger.info(f"Daily 9:00 AM reminder check complete for date {today_date}. Reminded: {count}")
+        except Exception as e:
+            logger.error(f"Error in daily reminder scheduler: {e}")
+        time.sleep(30)
+
 def main():
     # 1. Start Cloudflare Tunnel in background thread
     t_tunnel = threading.Thread(target=start_cloudflare_tunnel, daemon=True)
@@ -116,7 +139,11 @@ def main():
     t_poller = threading.Thread(target=start_gmail_poller, daemon=True)
     t_poller.start()
 
-    # 3. Start FastAPI Server on main thread
+    # 3. Start Daily Reminder Scheduler in background thread
+    t_reminder = threading.Thread(target=start_daily_reminder_scheduler, daemon=True)
+    t_reminder.start()
+
+    # 4. Start FastAPI Server on main thread
     logger.info("🚀 Starting FastAPI Server on http://localhost:8000 ...")
     uvicorn.run(app, host="0.0.0.0", port=8000)
 

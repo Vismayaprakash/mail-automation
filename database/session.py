@@ -21,5 +21,12 @@ def get_db():
         db.close()
 
 def init_db():
-    """Initialize all tables in SQLite database."""
+    """Initialize all tables in SQLite database and apply lightweight schema migrations."""
     Base.metadata.create_all(bind=engine)
+    try:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE email_threads ADD COLUMN attachments TEXT"))
+            conn.commit()
+    except Exception:
+        pass
