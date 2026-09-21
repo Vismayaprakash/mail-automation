@@ -86,7 +86,7 @@ def verify_whatsapp_webhook(request: Request):
 
 PROCESSED_MSG_IDS = set()
 
-def process_voice_note_async(thread_id: str, media_id: str):
+def process_voice_note_async(record_id: int, media_id: str):
     """Background execution for downloading and processing voice note revisions without delaying HTTP 200 OK to Meta."""
     from database.session import SessionLocal
     db = SessionLocal()
@@ -97,7 +97,7 @@ def process_voice_note_async(thread_id: str, media_id: str):
         if downloaded and os.path.exists(audio_path):
             orchestrator.revise_via_voice(
                 db=db,
-                thread_id=thread_id,
+                target_id=record_id,
                 audio_file_path=audio_path
             )
     except Exception as e:
@@ -105,14 +105,14 @@ def process_voice_note_async(thread_id: str, media_id: str):
     finally:
         db.close()
 
-def process_text_revision_async(thread_id: str, user_text: str):
+def process_text_revision_async(record_id: int, user_text: str):
     """Background execution for text revision without delaying HTTP 200 OK."""
     from database.session import SessionLocal
     db = SessionLocal()
     try:
-        pending_thread = db.query(EmailThread).filter(EmailThread.thread_id == thread_id).first()
+        pending_thread = db.query(EmailThread).filter(EmailThread.id == record_id).first()
         if pending_thread:
-            logger.info(f"Received text revision instruction: '{user_text}'")
+            logger.info(f"Received text revision instruction for thread ID #{pending_thread.id}: '{user_text}'")
             revised = llm_manager.revise_draft(
                 subject=pending_thread.subject,
                 sender=pending_thread.sender,
@@ -123,13 +123,16 @@ def process_text_revision_async(thread_id: str, user_text: str):
             pending_thread.proposed_reply = revised
             db.commit()
             
+            past_context = orchestrator._get_past_context(db=db, sender=pending_thread.sender, current_message_id=pending_thread.message_id)
+
             whatsapp_client.send_approval_request(
                 thread_id=pending_thread.thread_id,
                 sender_name=pending_thread.sender_name,
                 sender_email=pending_thread.sender,
                 subject=pending_thread.subject,
                 summary=f"{pending_thread.summary}\n\n📝 *Text Feedback Applied:*\n\"{user_text}\"",
-                draft_reply=revised
+                draft_reply=revised,
+                past_context=past_context
             )
     except Exception as e:
         logger.error(f"Error processing text revision in background: {e}")
@@ -167,18 +170,27 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
 
                     msg_type = msg.get("type")
                     
-                    # Fetch active or oldest pending approval thread (FIFO lock)
+                    # Target email by Quoted WhatsApp message context ID first (100% Recipient Precision)
+                    quoted_wa_id = msg.get("context", {}).get("id")
                     pending_thread = None
-                    if orchestrator.active_thread_id:
+
+                    if quoted_wa_id:
+                        pending_thread = db.query(EmailThread).filter(
+                            EmailThread.whatsapp_message_id == quoted_wa_id
+                        ).first()
+                        if pending_thread:
+                            logger.info(f"🎯 Targeted email thread ID #{pending_thread.id} via quoted WhatsApp message ID '{quoted_wa_id}' (From: {pending_thread.sender})")
+
+                    if not pending_thread and orchestrator.active_thread_id:
                         pending_thread = db.query(EmailThread).filter(
                             EmailThread.thread_id == orchestrator.active_thread_id,
                             EmailThread.status == ThreadStatus.PENDING_APPROVAL.value
-                        ).first()
+                        ).order_by(EmailThread.id.desc()).first()
 
                     if not pending_thread:
                         pending_thread = db.query(EmailThread).filter(
                             EmailThread.status == ThreadStatus.PENDING_APPROVAL.value
-                        ).order_by(EmailThread.created_at.asc()).first()
+                        ).order_by(EmailThread.created_at.desc()).first()
 
                     if not pending_thread:
                         logger.warning("Received WhatsApp reply but no pending email thread found.")
@@ -191,33 +203,35 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
                         
                         # 1. Greetings / Session Pings -> Just resend current prompt, DO NOT REVISE OR SEND
                         if upper_text in ["HI", "HELLO", "HEY", "START", "PING", "HELP"]:
-                            logger.info(f"Received greeting '{user_text}'. Re-sending active approval prompt.")
+                            logger.info(f"Received greeting '{user_text}'. Re-sending approval prompt for '{pending_thread.subject}'.")
+                            past_context = orchestrator._get_past_context(db=db, sender=pending_thread.sender, current_message_id=pending_thread.message_id)
                             whatsapp_client.send_approval_request(
                                 thread_id=pending_thread.thread_id,
                                 sender_name=pending_thread.sender_name,
                                 sender_email=pending_thread.sender,
                                 subject=pending_thread.subject,
                                 summary=pending_thread.summary,
-                                draft_reply=pending_thread.proposed_reply
+                                draft_reply=pending_thread.proposed_reply,
+                                past_context=past_context
                             )
                             continue
 
                         # 2. Explicit Approval -> ONLY "YES" or "APPROVE"
                         if upper_text in ["YES", "APPROVE"]:
-                            logger.info(f"User explicitly approved thread '{pending_thread.subject}'. Sending email via Gmail API.")
-                            orchestrator.approve_and_send(db, pending_thread.thread_id)
+                            logger.info(f"User explicitly approved thread ID #{pending_thread.id} ('{pending_thread.subject}'). Sending email via Gmail API to {pending_thread.sender}.")
+                            orchestrator.approve_and_send(db, pending_thread.id)
                         
                         # 3. Explicit Rejection / Skip -> "NO", "REJECT", "SKIP"
                         elif upper_text in ["NO", "REJECT", "SKIP"]:
-                            logger.info(f"User rejected/skipped thread '{pending_thread.subject}'. Skipping email reply.")
-                            orchestrator.reject_thread(db, pending_thread.thread_id)
+                            logger.info(f"User rejected/skipped thread ID #{pending_thread.id} ('{pending_thread.subject}'). Skipping email reply.")
+                            orchestrator.reject_thread(db, pending_thread.id)
                         
                         # 4. Text Revision Instructions -> Revise draft asynchronously
                         else:
                             import threading
                             threading.Thread(
                                 target=process_text_revision_async,
-                                args=(pending_thread.thread_id, user_text),
+                                args=(pending_thread.id, user_text),
                                 daemon=True
                             ).start()
 
@@ -228,7 +242,7 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
                             import threading
                             threading.Thread(
                                 target=process_voice_note_async,
-                                args=(pending_thread.thread_id, media_id),
+                                args=(pending_thread.id, media_id),
                                 daemon=True
                             ).start()
 

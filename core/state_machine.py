@@ -117,14 +117,23 @@ class WorkflowOrchestrator:
 
         return thread
 
-    def approve_and_send(self, db: Session, thread_id: str) -> bool:
+    def _get_thread_by_id_or_key(self, db: Session, target_id) -> EmailThread:
+        """Fetch EmailThread record by integer primary key ID or string thread_id."""
+        if isinstance(target_id, int) or (isinstance(target_id, str) and target_id.isdigit()):
+            record = db.query(EmailThread).filter(EmailThread.id == int(target_id)).first()
+            if record:
+                return record
+
+        return self._get_pending_or_latest_thread(db, str(target_id))
+
+    def approve_and_send(self, db: Session, target_id) -> bool:
         """Approve and dispatch the current email draft via Gmail API."""
-        thread = self._get_pending_or_latest_thread(db, thread_id)
+        thread = self._get_thread_by_id_or_key(db, target_id)
         if not thread:
-            logger.error(f"Thread {thread_id} not found in database.")
+            logger.error(f"Thread record {target_id} not found in database.")
             return False
 
-        logger.info(f"Approved thread {thread_id} (ID: {thread.id}). Sending email via Gmail API...")
+        logger.info(f"Approved thread ID #{thread.id} (Sender: {thread.sender}, Subject: '{thread.subject}'). Sending email via Gmail API...")
 
         # Step 1: Send via Gmail API
         success = gmail_client.send_email(
@@ -151,40 +160,41 @@ class WorkflowOrchestrator:
 
             # Step 3: Notify WhatsApp
             whatsapp_client.send_text_message(
-                f"✅ *Email Sent Successfully!*\n\nReplied to: {thread.sender_name}\nSubject: Re: {thread.subject}"
+                f"✅ *Email Sent Successfully!*\n\nReplied to: {thread.sender_name} ({thread.sender})\nSubject: Re: {thread.subject}"
             )
-            db.add(AuditLog(thread_id=thread_id, action="EMAIL_APPROVED_AND_SENT", details=thread.proposed_reply[:100]))
+            db.add(AuditLog(thread_id=thread.thread_id, action="EMAIL_APPROVED_AND_SENT", details=thread.proposed_reply[:100]))
             db.commit()
             return True
 
         return False
 
-    def reject_thread(self, db: Session, thread_id: str) -> bool:
+    def reject_thread(self, db: Session, target_id) -> bool:
         """Reject/skip the current email thread without sending any reply."""
-        thread = self._get_pending_or_latest_thread(db, thread_id)
+        thread = self._get_thread_by_id_or_key(db, target_id)
         if not thread:
-            logger.error(f"Thread {thread_id} not found in database.")
+            logger.error(f"Thread record {target_id} not found in database.")
             return False
 
-        logger.info(f"Rejected thread {thread_id} (ID: {thread.id}). Marking status as REJECTED and skipping email reply.")
+        logger.info(f"Rejected thread ID #{thread.id} (Sender: {thread.sender}, Subject: '{thread.subject}'). Marking status as REJECTED and skipping email reply.")
         thread.status = ThreadStatus.REJECTED.value
         self.active_thread_id = None
         db.commit()
 
         whatsapp_client.send_text_message(
-            f"⏭️ *Email Skipped*\n\nSkipped reply for: {thread.sender_name}\nSubject: {thread.subject}\nProceeding to next email."
+            f"⏭️ *Email Skipped*\n\nSkipped reply for: {thread.sender_name} ({thread.sender})\nSubject: {thread.subject}"
         )
-        db.add(AuditLog(thread_id=thread_id, action="EMAIL_REJECTED_SKIPPED", details=f"Thread {thread_id} skipped by user."))
+        db.add(AuditLog(thread_id=thread.thread_id, action="EMAIL_REJECTED_SKIPPED", details=f"Thread ID #{thread.id} skipped by user."))
         db.commit()
         return True
 
-    def revise_via_voice(self, db: Session, thread_id: str, audio_file_path: str) -> bool:
+    def revise_via_voice(self, db: Session, target_id, audio_file_path: str) -> bool:
         """Transcribe voice note, revise draft with Ollama, update DB, and send NEW WhatsApp approval request (DO NOT AUTO-SEND)."""
-        thread = self._get_pending_or_latest_thread(db, thread_id)
+        thread = self._get_thread_by_id_or_key(db, target_id)
         if not thread:
-            logger.error(f"Thread {thread_id} not found.")
+            logger.error(f"Thread record {target_id} not found.")
             return False
 
+        thread_id = thread.thread_id
         logger.info(f"Transcribing voice revision for thread {thread_id}...")
 
         # Step 1: Transcribe local voice audio with Whisper

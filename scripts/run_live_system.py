@@ -75,32 +75,20 @@ def start_cloudflare_tunnel():
                 break
 
 def start_gmail_poller(interval_seconds: int = 15):
-    """Background thread polling Gmail inbox with strict 1-by-1 sequential execution."""
+    """Background thread polling Gmail inbox in parallel multi-message mode."""
     init_db()
     time.sleep(5)
-    logger.info("📡 Live Gmail Inbox Poller started in background thread (Strict 1-by-1 Mode)...")
+    logger.info("📡 Live Gmail Inbox Poller started in background thread (Parallel Multi-Message Ingest Mode)...")
     while True:
         try:
             from database.session import SessionLocal
-            from database.models import EmailThread, ThreadStatus
+            from database.models import EmailThread
             db = SessionLocal()
 
-            # 1. Check if there is ANY email currently waiting for user approval or voice revision
-            pending_count = db.query(EmailThread).filter(
-                EmailThread.status.in_([ThreadStatus.PENDING_APPROVAL.value, ThreadStatus.REVISING.value])
-            ).count()
-
-            if pending_count > 0:
-                # An email thread is currently active & waiting for user WhatsApp action! PAUSE polling!
-                db.close()
-                time.sleep(interval_seconds)
-                continue
-
-            # 2. Only fetch when no active thread is pending (Process ONE email at a time)
+            # Process all unread emails so every email is summarized and sent to WhatsApp immediately
             unread_emails = gmail_client.fetch_unread_messages()
-            if unread_emails:
-                mail = unread_emails[0]  # Take ONLY the first unread email!
-                logger.info(f"📧 [Sequential 1-by-1] Processing Email from '{mail['sender']}' | Subject: '{mail['subject']}'")
+            for mail in unread_emails:
+                logger.info(f"📧 [Parallel Ingest] Processing Email from '{mail['sender']}' | Subject: '{mail['subject']}'")
                 email_thread = orchestrator.process_incoming_email(
                     db=db,
                     message_id=mail["message_id"],
@@ -112,7 +100,8 @@ def start_gmail_poller(interval_seconds: int = 15):
                     body=mail["body"]
                 )
                 gmail_client.mark_as_read(mail["message_id"])
-                logger.info(f"📱 WhatsApp Approval Prompt Sent for '{mail['subject']}'! Pausing inbox poller until completed.")
+                logger.info(f"📱 WhatsApp Approval Prompt Sent for '{mail['subject']}'!")
+
             db.close()
         except Exception as e:
             logger.error(f"Error in Gmail poller thread: {e}")
